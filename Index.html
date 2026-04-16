@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Mini Assembler ELF Builder</title>
+<style>
+body { font-family: monospace; background:#0f172a; color:#e2e8f0; padding:20px; }
+textarea { width:100%; height:200px; }
+button { margin:5px; padding:8px; }
+pre { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+
+<h2>Mini Assembler → ELF</h2>
+
+<textarea id="src">
+start:
+mov rax, 1
+write "Hello, World!"
+exit
+</textarea>
+
+<button onclick="build()">ビルド</button>
+<button onclick="download()">ダウンロード</button>
+
+<pre id="hex"></pre>
+
+<script>
+const REG = {
+    rax: 0,
+    rcx: 1,
+    rdx: 2,
+    rbx: 3,
+    rsp: 4,
+    rbp: 5,
+    rsi: 6,
+    rdi: 7
+};
+
+function toLE(val, bytes) {
+    let arr = [];
+    let v = BigInt(val);
+    for (let i = 0; i < bytes; i++) {
+        arr.push(Number(v & 0xffn));
+        v >>= 8n;
+    }
+    return arr;
+}
+
+function parse(src) {
+    return src.split("\n")
+        .map(l => l.trim())
+        .filter(l => l.length);
+}
+
+function build() {
+    let lines = parse(document.getElementById("src").value);
+
+    let labels = {};
+    let code = [];
+    let patches = [];
+    let data = [];
+
+    // 仮配置
+    const BASE = 0x400000;
+    const ELF_HEADER = 64;
+    const PH = 56;
+    let pc = 0;
+
+    // --- 1パス（ラベル記録）
+    for (let line of lines) {
+        if (line.endsWith(":")) {
+            labels[line.slice(0,-1)] = pc;
+            continue;
+        }
+
+        if (line.startsWith("mov")) pc += 7;
+        else if (line.startsWith("add")) pc += 7;
+        else if (line.startsWith("cmp")) pc += 7;
+        else if (line.startsWith("jmp")) pc += 5;
+        else if (line.startsWith("je")) pc += 6;
+        else if (line.startsWith("jne")) pc += 6;
+        else if (line.startsWith("write")) pc += 31;
+        else if (line.startsWith("exit")) pc += 12;
+    }
+
+    pc = 0;
+
+    // --- 2パス（生成）
+    for (let line of lines) {
+        if (line.endsWith(":")) continue;
+
+        let parts = line.split(/[ ,]+/);
+
+        if (parts[0] === "mov") {
+            let reg = REG[parts[1]];
+            let imm = parseInt(parts[2]);
+
+            code.push(0x48,0xc7,0xc0 + reg, ...toLE(imm,4));
+            pc += 7;
+        }
+
+        else if (parts[0] === "add") {
+            let reg = REG[parts[1]];
+            let imm = parseInt(parts[2]);
+
+            code.push(0x48,0x81,0xc0 + reg, ...toLE(imm,4));
+            pc += 7;
+        }
+
+        else if (parts[0] === "cmp") {
+            let reg = REG[parts[1]];
+            let imm = parseInt(parts[2]);
+
+            code.push(0x48,0x81,0xf8 + reg, ...toLE(imm,4));
+            pc += 7;
+        }
+
+        else if (parts[0] === "jmp") {
+            code.push(0xe9,0,0,0,0);
+            patches.push({pos: pc+1, label: parts[1], size:4});
+            pc += 5;
+        }
+
+        else if (parts[0] === "je") {
+            code.push(0x0f,0x84,0,0,0,0);
+            patches.push({pos: pc+2, label: parts[1], size:4});
+            pc += 6;
+        }
+
+        else if (parts[0] === "jne") {
+            code.push(0x0f,0x85,0,0,0,0);
+            patches.push({pos: pc+2, label: parts[1], size:4});
+            pc += 6;
+        }
+
+        else if (parts[0] === "write") {
+            let str = line.match(/"(.*)"/)[1] + "\n";
+            let bytes = new TextEncoder().encode(str);
+
+            let dataPos = data.length;
+            data.push(...bytes);
+
+            code.push(
+                0x48,0xc7,0xc0,1,0,0,0,
+                0x48,0xc7,0xc7,1,0,0,0,
+                0x48,0xbe,0,0,0,0,0,0,0,0,
+                0x48,0xc7,0xc2,...toLE(bytes.length,4),
+                0x0f,0x05
+            );
+
+            patches.push({pos: pc+16, dataPos});
+            pc += 31;
+        }
+
+        else if (parts[0] === "exit") {
+            code.push(
+                0x48,0xc7,0xc0,60,0,0,0,
+                0x48,0x31,0xff,
+                0x0f,0x05
+            );
+            pc += 12;
+        }
+    }
+
+    // --- アドレス確定
+    let entry = BASE + ELF_HEADER + PH;
+    let dataOffset = ELF_HEADER + PH + code.length;
+
+    // ラベル解決
+    for (let p of patches) {
+        if (p.label) {
+            let target = labels[p.label];
+            let rel = target - (p.pos + 4);
+            let le = toLE(rel,4);
+            for (let i=0;i<4;i++) code[p.pos+i] = le[i];
+        }
+        if (p.dataPos !== undefined) {
+            let addr = BASE + dataOffset + p.dataPos;
+            let le = toLE(addr,8);
+            for (let i=0;i<8;i++) code[p.pos+i] = le[i];
+        }
+    }
+
+    let fileSize = ELF_HEADER + PH + code.length + data.length;
+
+    // ELF
+    let elf = [
+        0x7f,0x45,0x4c,0x46, 0x02,0x01,0x01,0x00,
+        0,0,0,0,0,0,0,0,
+        2,0,0x3e,0,
+        1,0,0,0,
+        ...toLE(entry,8),
+        ...toLE(ELF_HEADER,8),
+        0,0,0,0,0,0,0,0,
+        0,0,0,0,
+        ELF_HEADER,0,
+        PH,0,
+        1,0,
+        0,0,0,0
+    ];
+
+    let ph = [
+        1,0,0,0,
+        5,0,0,0,
+        ...toLE(0,8),
+        ...toLE(BASE,8),
+        ...toLE(BASE,8),
+        ...toLE(fileSize,8),
+        ...toLE(fileSize,8),
+        ...toLE(0x1000,8)
+    ];
+
+    let full = [...elf, ...ph, ...code, ...data];
+
+    window.bin = new Uint8Array(full);
+
+    document.getElementById("hex").textContent =
+        full.map(b=>b.toString(16).padStart(2,"0")).join(" ");
+}
+
+function download() {
+    let blob = new Blob([window.bin]);
+    let a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "a.out";
+    a.click();
+}
+</script>
+
+</body>
+</html>
