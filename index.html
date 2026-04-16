@@ -8,7 +8,8 @@
 body { background:#f5f5f5; font-family:sans-serif; margin:20px; }
 textarea { width:100%; height:260px; font-family:monospace; }
 button { padding:10px; margin-top:10px; }
-.output { margin-top:10px; font-family:monospace; background:#fff; padding:10px; }
+.output { margin-top:10px; background:#fff; padding:10px; font-family:monospace; }
+.commands { margin-top:15px; background:#fff; padding:10px; }
 </style>
 </head>
 
@@ -18,15 +19,16 @@ button { padding:10px; margin-top:10px; }
 
 <textarea id="code">
 start:
+cmp rax, 0
+je end
+
 write msg, 14
-write msg2, 6
+
+end:
 exit
 
 msg:
 db "Hello, World!\n"
-
-msg2:
-db "Bye!\n"
 </textarea>
 
 <button onclick="build()">Build</button>
@@ -34,17 +36,42 @@ db "Bye!\n"
 
 <div class="output" id="out"></div>
 
+<div class="commands">
+<b>命令一覧</b><br><br>
+
+<b>算術</b><br>
+mov reg, imm<br>
+add reg, imm<br>
+sub reg, imm<br><br>
+
+<b>比較・分岐</b><br>
+cmp reg, imm<br>
+jmp label<br>
+je label<br>
+jne label<br><br>
+
+<b>システム</b><br>
+write label, len<br>
+exit<br><br>
+
+<b>データ</b><br>
+label:<br>
+db "string"<br>
+</div>
+
 <script>
 let finalBinary = [];
 
 function build() {
     const lines = document.getElementById("code").value.split("\n");
 
-    let labels = {};
-    let code = [];
-    let data = [];
+    let codeLabels = {};
+    let dataLabels = {};
 
+    let code = [];
     let offset = 0x78;
+
+    let inData = false;
 
     // ===== PASS1 =====
     for (let line of lines) {
@@ -52,8 +79,18 @@ function build() {
         if (!line) continue;
 
         if (line.endsWith(":")) {
-            labels[line.slice(0,-1)] = offset;
-        } else if (line.startsWith("db")) {
+            let name = line.slice(0,-1);
+
+            if (inData) {
+                dataLabels[name] = offset;
+            } else {
+                codeLabels[name] = offset;
+            }
+            continue;
+        }
+
+        if (line.startsWith("db")) {
+            inData = true;
             let str = line.match(/"(.*)"/)[1];
             offset += str.length;
         } else {
@@ -63,6 +100,7 @@ function build() {
 
     // ===== PASS2 =====
     offset = 0x78;
+    inData = false;
 
     for (let line of lines) {
         line = line.trim();
@@ -70,19 +108,50 @@ function build() {
 
         let parts = line.split(/[ ,]+/);
 
+        if (line.startsWith("db")) {
+            inData = true;
+            let str = line.match(/"(.*)"/)[1];
+            for (let c of str) code.push(c.charCodeAt(0));
+            offset += str.length;
+            continue;
+        }
+
         switch(parts[0]) {
 
+            case "mov":
+                code.push(...mov(parts[1], parts[2]));
+                break;
+
+            case "add":
+                code.push(...add(parts[1], parts[2]));
+                break;
+
+            case "sub":
+                code.push(...sub(parts[1], parts[2]));
+                break;
+
+            case "cmp":
+                code.push(...cmp(parts[1], parts[2]));
+                break;
+
+            case "jmp":
+                code.push(...jmp(codeLabels[parts[1]], offset));
+                break;
+
+            case "je":
+                code.push(...je(codeLabels[parts[1]], offset));
+                break;
+
+            case "jne":
+                code.push(...jne(codeLabels[parts[1]], offset));
+                break;
+
             case "write":
-                code.push(...write(labels[parts[1]], parseInt(parts[2])));
+                code.push(...write(dataLabels[parts[1]], parseInt(parts[2])));
                 break;
 
             case "exit":
                 code.push(...exit());
-                break;
-
-            case "db":
-                let str = line.match(/"(.*)"/)[1];
-                for (let c of str) code.push(c.charCodeAt(0));
                 break;
         }
 
@@ -95,7 +164,60 @@ function build() {
         finalBinary.map(b => b.toString(16).padStart(2,"0")).join(" ");
 }
 
-// ===== ELF生成 =====
+// ===== 命令 =====
+
+function mov(reg, val) {
+    const map = {rax:0xc0, rdi:0xc7};
+    return [0x48,0xc7,map[reg], parseInt(val),0,0,0];
+}
+
+function add(reg, val) {
+    return [0x48,0x83,0xc0, parseInt(val)];
+}
+
+function sub(reg, val) {
+    return [0x48,0x83,0xe8, parseInt(val)];
+}
+
+function cmp(reg, val) {
+    return [0x48,0x83,0xf8, parseInt(val)];
+}
+
+function jmp(addr, cur) {
+    let rel = addr - (cur + 5);
+    return [0xe9, ...int32(rel)];
+}
+
+function je(addr, cur) {
+    let rel = addr - (cur + 6);
+    return [0x0f,0x84, ...int32(rel)];
+}
+
+function jne(addr, cur) {
+    let rel = addr - (cur + 6);
+    return [0x0f,0x85, ...int32(rel)];
+}
+
+function write(addr, len) {
+    return [
+        0x48,0xc7,0xc0,1,0,0,0,
+        0x48,0xc7,0xc7,1,0,0,0,
+        0x48,0xbe,...int64(addr),
+        0x48,0xc7,0xc2,len,0,0,0,
+        0x0f,0x05
+    ];
+}
+
+function exit() {
+    return [
+        0x48,0xc7,0xc0,60,0,0,0,
+        0x48,0x31,0xff,
+        0x0f,0x05
+    ];
+}
+
+// ===== ELF =====
+
 function buildELF(code) {
     const size = 0x78 + code.length;
 
@@ -123,46 +245,31 @@ function buildELF(code) {
     return elf.concat(code);
 }
 
-// ===== syscall =====
-
-function write(addr, len) {
-    return [
-        0x48,0xc7,0xc0,1,0,0,0,
-        0x48,0xc7,0xc7,1,0,0,0,
-        0x48,0xbe,...int64(addr),
-        0x48,0xc7,0xc2,len,0,0,0,
-        0x0f,0x05
-    ];
-}
-
-function exit() {
-    return [
-        0x48,0xc7,0xc0,60,0,0,0,
-        0x48,0x31,0xff,
-        0x0f,0x05
-    ];
-}
-
 // ===== util =====
 
+function int32(x){
+    return [x&255,(x>>8)&255,(x>>16)&255,(x>>24)&255];
+}
+
 function int64(x){
-    return [
-        x&255,(x>>8)&255,(x>>16)&255,(x>>24)&255,
-        0,0,0,0
-    ];
+    return [x&255,(x>>8)&255,(x>>16)&255,(x>>24)&255,0,0,0,0];
 }
 
 function estimate(line){
     if(line.startsWith("write")) return 24;
     if(line.startsWith("exit")) return 12;
+    if(line.startsWith("mov")) return 7;
+    if(line.startsWith("add")) return 4;
+    if(line.startsWith("sub")) return 4;
+    if(line.startsWith("cmp")) return 4;
+    if(line.startsWith("jmp")) return 5;
+    if(line.startsWith("je")||line.startsWith("jne")) return 6;
     if(line.startsWith("db")) return line.length;
     return 0;
 }
 
-// ===== ダウンロード =====
-
 function download(){
-    const blob = new Blob([new Uint8Array(finalBinary)], {type:"application/octet-stream"});
+    const blob = new Blob([new Uint8Array(finalBinary)]);
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = "a.out";
