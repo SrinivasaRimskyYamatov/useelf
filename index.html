@@ -1,237 +1,217 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html>
 <head>
 <meta charset="UTF-8">
 <title>Mini ELF Assembler</title>
+
 <style>
-body { font-family: monospace; background:#0f172a; color:#e2e8f0; padding:20px; }
-textarea { width:100%; height:200px; }
-button { margin:5px; padding:8px; }
-pre { white-space: pre-wrap; }
-.box { margin-top:20px; padding:10px; background:#020617; border:1px solid #334155; }
+body {
+    background: #f5f5f5;
+    color: #222;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 20px;
+}
+
+h2 {
+    margin-bottom: 10px;
+}
+
+textarea {
+    width: 100%;
+    height: 300px;
+    background: #ffffff;
+    color: #000;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    padding: 10px;
+    font-family: monospace;
+    font-size: 14px;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
+}
+
+button {
+    margin-top: 10px;
+    padding: 10px 16px;
+    border: none;
+    border-radius: 8px;
+    background: #007aff;
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #005ecb;
+}
+
+.output {
+    margin-top: 15px;
+    padding: 10px;
+    background: #fff;
+    border-radius: 8px;
+    border: 1px solid #ddd;
+    font-family: monospace;
+}
 </style>
 </head>
+
 <body>
 
-<h2>⚙️ Stable Mini ELF Assembler</h2>
+<h2>Mini ELF Assembler</h2>
 
-<textarea id="src">
+<textarea id="code">
 start:
-    mov rax, 1
-    write "Hello, World!"
-    exit
+mov rax, 1
+mov rdi, 1
+mov rsi, msg
+mov rdx, 14
+syscall
+
+mov rax, 60
+mov rdi, 0
+syscall
+
+msg:
+db "Hello, World!\n"
 </textarea>
 
-<button onclick="build()">ビルド</button>
-<button onclick="download()">ダウンロード</button>
+<button onclick="build()">Build</button>
 
-<div class="box">
-<h3>HEX出力</h3>
-<pre id="hex"></pre>
-</div>
-
-<div class="box">
-<h3>命令一覧</h3>
-<pre>
-mov reg, imm
-add reg, imm
-cmp reg, imm
-
-jmp label
-je label
-jne label
-
-write "text"
-exit
-</pre>
-</div>
+<div class="output" id="out"></div>
 
 <script>
-const REG = {
-    rax:0, rcx:1, rdx:2, rbx:3,
-    rsp:4, rbp:5, rsi:6, rdi:7
-};
-
-function toLE(val, bytes){
-    let v = BigInt(val);
-    let out=[];
-    for(let i=0;i<bytes;i++){
-        out.push(Number(v & 0xffn));
-        v >>= 8n;
-    }
-    return out;
-}
-
-function parse(src){
-    return src.split("\n")
-        .map(l=>l.trim())
-        .filter(l=>l.length);
-}
-
-function build(){
-try{
-    let lines = parse(src.value);
+function build() {
+    const lines = document.getElementById("code").value.split("\n");
 
     let labels = {};
     let code = [];
-    let data = [];
-    let patches = [];
+    let offset = 0x78;
 
-    const BASE = 0x400000;
-    const EH = 64;
-    const PH = 56;
+    // ===== PASS1 =====
+    for (let line of lines) {
+        line = line.trim();
+        if (!line) continue;
 
-    let pc = 0;
-
-    // --- 1パス（サイズ計算＋ラベル）
-    for(let line of lines){
-        if(line.endsWith(":")){
-            labels[line.slice(0,-1)] = pc;
-            continue;
-        }
-
-        if(line.startsWith("mov")) pc+=7;
-        else if(line.startsWith("add")) pc+=7;
-        else if(line.startsWith("cmp")) pc+=7;
-        else if(line.startsWith("jmp")) pc+=5;
-        else if(line.startsWith("je")||line.startsWith("jne")) pc+=6;
-        else if(line.startsWith("write")) pc+=31;
-        else if(line.startsWith("exit")) pc+=12;
-    }
-
-    pc = 0;
-
-    // --- 2パス（生成）
-    for(let line of lines){
-        if(line.endsWith(":")) continue;
-
-        let p = line.split(/[ ,]+/);
-
-        if(p[0]==="mov"){
-            code.push(0x48,0xc7,0xc0+REG[p[1]],...toLE(p[2],4));
-            pc+=7;
-        }
-
-        else if(p[0]==="add"){
-            code.push(0x48,0x81,0xc0+REG[p[1]],...toLE(p[2],4));
-            pc+=7;
-        }
-
-        else if(p[0]==="cmp"){
-            code.push(0x48,0x81,0xf8+REG[p[1]],...toLE(p[2],4));
-            pc+=7;
-        }
-
-        else if(p[0]==="jmp"){
-            code.push(0xe9,0,0,0,0);
-            patches.push({pos:pc+1,label:p[1]});
-            pc+=5;
-        }
-
-        else if(p[0]==="je"){
-            code.push(0x0f,0x84,0,0,0,0);
-            patches.push({pos:pc+2,label:p[1]});
-            pc+=6;
-        }
-
-        else if(p[0]==="jne"){
-            code.push(0x0f,0x85,0,0,0,0);
-            patches.push({pos:pc+2,label:p[1]});
-            pc+=6;
-        }
-
-        else if(p[0]==="write"){
-            let str = line.match(/"(.*)"/)[1] + "\n";
-            let bytes = new TextEncoder().encode(str);
-
-            let dataPos = data.length;
-            data.push(...bytes);
-
-            code.push(
-                0x48,0xc7,0xc0,1,0,0,0,
-                0x48,0xc7,0xc7,1,0,0,0,
-                0x48,0xbe,0,0,0,0,0,0,0,0,
-                0x48,0xc7,0xc2,...toLE(bytes.length,4),
-                0x0f,0x05
-            );
-
-            patches.push({pos:pc+16,dataPos});
-            pc+=31;
-        }
-
-        else if(p[0]==="exit"){
-            code.push(
-                0x48,0xc7,0xc0,60,0,0,0,
-                0x48,0x31,0xff,
-                0x0f,0x05
-            );
-            pc+=12;
+        if (line.endsWith(":")) {
+            labels[line.slice(0,-1)] = offset;
+        } else if (line.startsWith("db")) {
+            let str = line.match(/"(.*)"/)[1];
+            offset += str.length;
+        } else {
+            offset += estimate(line);
         }
     }
 
-    let entry = BASE + EH + PH;
-    let dataOffset = EH + PH + code.length;
+    // ===== PASS2 =====
+    offset = 0x78;
 
-    // --- パッチ処理
-    for(let p of patches){
-        if(p.label){
-            let rel = labels[p.label] - (p.pos + 4);
-            let le = toLE(rel,4);
-            for(let i=0;i<4;i++) code[p.pos+i]=le[i];
+    for (let line of lines) {
+        line = line.trim();
+        if (!line || line.endsWith(":")) continue;
+
+        let parts = line.split(/[ ,]+/);
+
+        switch(parts[0]) {
+
+            case "mov":
+                code.push(...mov(parts[1], parts[2]));
+                break;
+
+            case "add":
+                code.push(...add(parts[1], parts[2]));
+                break;
+
+            case "sub":
+                code.push(...sub(parts[1], parts[2]));
+                break;
+
+            case "cmp":
+                code.push(...cmp(parts[1], parts[2]));
+                break;
+
+            case "jmp":
+                code.push(...jmp(labels[parts[1]], offset));
+                break;
+
+            case "je":
+                code.push(...je(labels[parts[1]], offset));
+                break;
+
+            case "jne":
+                code.push(...jne(labels[parts[1]], offset));
+                break;
+
+            case "syscall":
+                code.push(0x0f,0x05);
+                break;
+
+            case "db":
+                let str = line.match(/"(.*)"/)[1];
+                for (let c of str) code.push(c.charCodeAt(0));
+                break;
         }
 
-        if(p.dataPos !== undefined){
-            let addr = BASE + dataOffset + p.dataPos;
-            let le = toLE(addr,8);
-            for(let i=0;i<8;i++) code[p.pos+i]=le[i];
-        }
+        offset += estimate(line);
     }
 
-    let size = EH + PH + code.length + data.length;
-
-    let elf = [
-        0x7f,0x45,0x4c,0x46,2,1,1,0,
-        0,0,0,0,0,0,0,0,
-        2,0,0x3e,0,
-        1,0,0,0,
-        ...toLE(entry,8),
-        ...toLE(EH,8),
-        0,0,0,0,0,0,0,0,
-        0,0,0,0,
-        EH,0,
-        PH,0,
-        1,0,
-        0,0,0,0
-    ];
-
-    let ph = [
-        1,0,0,0,
-        5,0,0,0,
-        ...toLE(0,8),
-        ...toLE(BASE,8),
-        ...toLE(BASE,8),
-        ...toLE(size,8),
-        ...toLE(size,8),
-        ...toLE(0x1000,8)
-    ];
-
-    let full = [...elf,...ph,...code,...data];
-
-    window.bin = new Uint8Array(full);
-
-    hex.textContent = full.map(b=>b.toString(16).padStart(2,"0")).join(" ");
-
-}catch(e){
-    alert("エラー: "+e.message);
-}
+    document.getElementById("out").textContent =
+        code.map(b => b.toString(16).padStart(2,"0")).join(" ");
 }
 
-function download(){
-    let blob = new Blob([window.bin]);
-    let a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "a.out";
-    a.click();
+// ===== 命令 =====
+
+function mov(reg, val) {
+    if (val === "msg") val = 0x4000a0;
+
+    const map = {rax:0xc0, rdi:0xc7, rsi:0xc6, rdx:0xc2};
+    let imm = parseInt(val) || val;
+
+    return [0x48,0xc7,map[reg], imm,0,0,0];
+}
+
+function add(reg, val) {
+    const map = {rax:0xc0};
+    return [0x48,0x83,map[reg], parseInt(val)];
+}
+
+function sub(reg, val) {
+    const map = {rax:0xe8};
+    return [0x48,0x83,map[reg], parseInt(val)];
+}
+
+function cmp(reg, val) {
+    return [0x48,0x83,0xf8, parseInt(val)];
+}
+
+function jmp(addr, cur) {
+    let rel = addr - (cur + 5);
+    return [0xe9, ...int32(rel)];
+}
+
+function je(addr, cur) {
+    let rel = addr - (cur + 6);
+    return [0x0f,0x84, ...int32(rel)];
+}
+
+function jne(addr, cur) {
+    let rel = addr - (cur + 6);
+    return [0x0f,0x85, ...int32(rel)];
+}
+
+function int32(x){
+    return [x&255,(x>>8)&255,(x>>16)&255,(x>>24)&255];
+}
+
+function estimate(line){
+    if(line.startsWith("mov")) return 7;
+    if(line.startsWith("add")) return 4;
+    if(line.startsWith("sub")) return 4;
+    if(line.startsWith("cmp")) return 4;
+    if(line.startsWith("jmp")) return 5;
+    if(line.startsWith("je")||line.startsWith("jne")) return 6;
+    if(line.startsWith("syscall")) return 2;
+    if(line.startsWith("db")) return line.length;
+    return 0;
 }
 </script>
 
