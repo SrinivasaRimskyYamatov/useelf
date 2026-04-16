@@ -5,48 +5,10 @@
 <title>Mini ELF Assembler</title>
 
 <style>
-body {
-    background:#f5f5f5;
-    font-family:sans-serif;
-    margin:20px;
-}
-
-textarea {
-    width:100%;
-    height:260px;
-    font-family:monospace;
-    border-radius:8px;
-    border:1px solid #ccc;
-    padding:10px;
-}
-
-button {
-    margin-top:10px;
-    padding:10px 16px;
-    background:#007aff;
-    color:#fff;
-    border:none;
-    border-radius:8px;
-    cursor:pointer;
-}
-
-.output {
-    margin-top:15px;
-    background:#fff;
-    padding:10px;
-    border-radius:8px;
-    border:1px solid #ddd;
-    font-family:monospace;
-    word-break:break-all;
-}
-
-.commands {
-    margin-top:20px;
-    background:#fff;
-    padding:10px;
-    border-radius:8px;
-    border:1px solid #ddd;
-}
+body { background:#f5f5f5; font-family:sans-serif; margin:20px; }
+textarea { width:100%; height:260px; font-family:monospace; }
+button { padding:10px; margin-top:10px; }
+.output { margin-top:10px; font-family:monospace; background:#fff; padding:10px; }
 </style>
 </head>
 
@@ -57,45 +19,31 @@ button {
 <textarea id="code">
 start:
 write msg, 14
+write msg2, 6
 exit
 
 msg:
 db "Hello, World!\n"
+
+msg2:
+db "Bye!\n"
 </textarea>
 
 <button onclick="build()">Build</button>
+<button onclick="download()">Download ELF</button>
 
 <div class="output" id="out"></div>
 
-<div class="commands">
-<b>命令一覧</b><br><br>
-
-<b>基本</b><br>
-mov reg, imm<br>
-add reg, imm<br>
-sub reg, imm<br>
-cmp reg, imm<br><br>
-
-<b>ジャンプ</b><br>
-jmp label<br>
-je label<br>
-jne label<br><br>
-
-<b>システム</b><br>
-write label, length<br>
-exit<br><br>
-
-<b>データ</b><br>
-label:<br>
-db "string"<br>
-</div>
-
 <script>
+let finalBinary = [];
+
 function build() {
     const lines = document.getElementById("code").value.split("\n");
 
     let labels = {};
     let code = [];
+    let data = [];
+
     let offset = 0x78;
 
     // ===== PASS1 =====
@@ -124,34 +72,6 @@ function build() {
 
         switch(parts[0]) {
 
-            case "mov":
-                code.push(...mov(parts[1], parts[2]));
-                break;
-
-            case "add":
-                code.push(...add(parts[1], parts[2]));
-                break;
-
-            case "sub":
-                code.push(...sub(parts[1], parts[2]));
-                break;
-
-            case "cmp":
-                code.push(...cmp(parts[1], parts[2]));
-                break;
-
-            case "jmp":
-                code.push(...jmp(labels[parts[1]], offset));
-                break;
-
-            case "je":
-                code.push(...je(labels[parts[1]], offset));
-                break;
-
-            case "jne":
-                code.push(...jne(labels[parts[1]], offset));
-                break;
-
             case "write":
                 code.push(...write(labels[parts[1]], parseInt(parts[2])));
                 break;
@@ -169,53 +89,49 @@ function build() {
         offset += estimate(line);
     }
 
+    finalBinary = buildELF(code);
+
     document.getElementById("out").textContent =
-        code.map(b => b.toString(16).padStart(2,"0")).join(" ");
+        finalBinary.map(b => b.toString(16).padStart(2,"0")).join(" ");
 }
 
-// ===== 命令 =====
+// ===== ELF生成 =====
+function buildELF(code) {
+    const size = 0x78 + code.length;
 
-function mov(reg, val) {
-    const map = {rax:0xc0, rdi:0xc7, rsi:0xc6, rdx:0xc2};
-    return [0x48,0xc7,map[reg], parseInt(val),0,0,0];
+    let elf = [
+        0x7f,0x45,0x4c,0x46,
+        2,1,1,0,0,0,0,0,0,0,0,0,
+        2,0,0x3e,0,
+        1,0,0,0,
+        0x78,0,0x40,0,0,0,0,0,
+        0x40,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,
+        0x40,0,0x38,0,
+        1,0,0,0,
+        1,0,0,0,
+        5,0,0,0,
+        0,0,0,0,
+        0,0,0,0,
+        0,0,0,0,
+        0x40,0,0,0,0,0,0,0,
+        size,0,0,0,0,0,0,0,
+        size,0,0,0,0,0,0,0,
+        0x00,0x10,0,0,0,0,0,0
+    ];
+
+    return elf.concat(code);
 }
 
-function add(reg, val) {
-    return [0x48,0x83,0xc0, parseInt(val)];
-}
-
-function sub(reg, val) {
-    return [0x48,0x83,0xe8, parseInt(val)];
-}
-
-function cmp(reg, val) {
-    return [0x48,0x83,0xf8, parseInt(val)];
-}
-
-function jmp(addr, cur) {
-    let rel = addr - (cur + 5);
-    return [0xe9, ...int32(rel)];
-}
-
-function je(addr, cur) {
-    let rel = addr - (cur + 6);
-    return [0x0f,0x84, ...int32(rel)];
-}
-
-function jne(addr, cur) {
-    let rel = addr - (cur + 6);
-    return [0x0f,0x85, ...int32(rel)];
-}
-
-// ===== syscallラッパ =====
+// ===== syscall =====
 
 function write(addr, len) {
     return [
-        0x48,0xc7,0xc0,1,0,0,0,        // rax=1
-        0x48,0xc7,0xc7,1,0,0,0,        // rdi=1
-        0x48,0xbe,...int64(addr),      // rsi=addr
-        0x48,0xc7,0xc2,len,0,0,0,      // rdx=len
-        0x0f,0x05                      // syscall
+        0x48,0xc7,0xc0,1,0,0,0,
+        0x48,0xc7,0xc7,1,0,0,0,
+        0x48,0xbe,...int64(addr),
+        0x48,0xc7,0xc2,len,0,0,0,
+        0x0f,0x05
     ];
 }
 
@@ -227,9 +143,7 @@ function exit() {
     ];
 }
 
-function int32(x){
-    return [x&255,(x>>8)&255,(x>>16)&255,(x>>24)&255];
-}
+// ===== util =====
 
 function int64(x){
     return [
@@ -241,14 +155,18 @@ function int64(x){
 function estimate(line){
     if(line.startsWith("write")) return 24;
     if(line.startsWith("exit")) return 12;
-    if(line.startsWith("mov")) return 7;
-    if(line.startsWith("add")) return 4;
-    if(line.startsWith("sub")) return 4;
-    if(line.startsWith("cmp")) return 4;
-    if(line.startsWith("jmp")) return 5;
-    if(line.startsWith("je")||line.startsWith("jne")) return 6;
     if(line.startsWith("db")) return line.length;
     return 0;
+}
+
+// ===== ダウンロード =====
+
+function download(){
+    const blob = new Blob([new Uint8Array(finalBinary)], {type:"application/octet-stream"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "a.out";
+    a.click();
 }
 </script>
 
